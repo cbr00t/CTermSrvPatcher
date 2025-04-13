@@ -23,7 +23,8 @@ namespace CTermSrvPatcher {
 		static string EXEName { get => Path.GetFileNameWithoutExtension(Assembly.GetExecutingAssembly().Location); }
 
 		/// <summary>The main entry point for the application.</summary>
-		[STAThread()] static int Main(string[] args) {
+		[STAThread()]
+		static int Main(string[] args) {
 			Application.EnableVisualStyles();
 			Application.SetCompatibleTextRenderingDefault(false);
 			for (int i = 0; i < args.Length; i++) {
@@ -45,31 +46,26 @@ namespace CTermSrvPatcher {
 			}
 			if (filePath == null) { filePath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "termsrv.dll"); }
 			if (filePath == "-") { outputToStdout = true; filePath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "termsrv.dll"); }
-			initRDPSettings();
-			if (source == null || target == null) {
-				var iniPath = resolveIniPath(configPath);
-				if (File.Exists(iniPath)) {
-					var config = File.ReadAllLines(iniPath);
-					if (source == null) { source = parseHex(readValue(config, "source")); }
-					if (target == null) { target = parseHex(readValue(config, "target")); }
-				}
+			var iniPath = resolveIniPath(configPath);
+			if (!autoFlag && File.Exists(iniPath)) {
+				var config = File.ReadAllLines(iniPath);
+				if (source == null) { source = parseHex(readValue(config, "source")); }
+				if (target == null) { target = parseHex(readValue(config, "target")); }
 			}
 			var original = readFileWithRetry(filePath);
-			if (!autoFlag && (source == null || target == null)) {
-				source = source ?? DefaultSource;
-				target = target ?? DefaultTarget;
-			}
+			if (!autoFlag && (source == null || target == null)) { source = source ?? DefaultSource; target = target ?? DefaultTarget; }
+			initRDPSettings();
 			int sourceOffset = -1, targetOffset = -1;
 			if (source == null || target == null) {
 				var result = analyzeAndSuggestPatch(original);
 				if (result == null && allowJmpPatch) { result = analyzeAndSuggestJmpPatch(original); }
 				if (result != null) {
-					source = result.Item1; target = result.Item2;
-					sourceOffset = findPattern(original, source); targetOffset = findPattern(original, target);
-					if (sourceOffset == -1 && targetOffset != -1) { Console.WriteLine("[info] Patch already applied (confirmed by content)"); return 0; }
-					Console.WriteLine($"[info] Patch auto-selected at [0x${result.Item3:X}]");
+					source = result.Item1; target = result.Item2; int offset = result.Item3;
+					if (bytesMatch(original, offset, target)) {
+						Console.WriteLine("[info] Patch already applied at expected offset.");
+						return 0;
+					}
 				}
-				else { Console.Error.WriteLine("[error] No default or matching patch found. File may be already patched"); return -2; }
 			}
 			if (sourceOffset < 0) { sourceOffset = findPattern(original, source); }
 			if (targetOffset < 0) { targetOffset = findPattern(original, target); }
@@ -116,6 +112,22 @@ namespace CTermSrvPatcher {
 			catch (UnauthorizedAccessException) { Console.Error.WriteLine("[error] Access denied. Please run as Administrator."); }
 			catch (Exception ex) { Console.Error.WriteLine("[error] " + ex.Message); }
 		}
+		static void printUsage() {
+			Console.WriteLine("Usage:");
+			Console.WriteLine("  -a  | --auto                          Analyze & Auto Patch");
+			Console.WriteLine("  -r  | --restore                       Restore Original 'termsrv.dll' File");
+			Console.WriteLine("  -s  | --source        <hex bytes>     e.g. 39 81 3C 06 ...");
+			Console.WriteLine("  -t  | --target        <hex bytes>     e.g. B8 00 01 00 ...");
+			Console.WriteLine("  -f  | --file          <path|->        defaults to system32/termsrv.dll, '-' = stdout");
+			Console.WriteLine("  -c  | --config        <ini path>      default: exeName.ini in working dir or exe dir");
+			Console.WriteLine("  -v  | --version                       show app version");
+			Console.WriteLine("  -tv | --tsver|--ts-version            show termsrv.dll version");
+			Console.WriteLine("  -j  | --allow-jmp-patch               Allow JMP based patch");
+			Console.WriteLine("  -j- | --no-jmp- patch                 DENY JMP based patch");
+			Console.WriteLine("  -?  | --help                          show this message");
+			Console.WriteLine();
+			Console.WriteLine("  Made with ❤️ by a!cbr00t-CGPR ✊");
+		}
 		static void printAppVersion() {
 			var asm = Assembly.GetExecutingAssembly();
 			var name = asm.GetCustomAttribute<AssemblyProductAttribute>()?.Product ?? "PatchTool";
@@ -141,41 +153,12 @@ namespace CTermSrvPatcher {
 			var bckPath = path + ".bak";
 			if (!File.Exists(bckPath)) { Console.Error.WriteLine("[error] Backup file not found: " + bckPath); return -10; }
 			try {
-				if (File.Exists(path)) { File.Delete(path); } File.Move(bckPath, path);
+				if (File.Exists(path)) { File.Delete(path); }
+				File.Move(bckPath, path);
 				Console.WriteLine("[done] Restored original file from backup.");
 				return 0;
 			}
 			catch (Exception ex) { Console.Error.WriteLine("[error] Failed to restore: " + ex.Message); return -11; }
-		}
-		static string resolveIniPath(string configPath) {
-			if (!string.IsNullOrEmpty(configPath)) return configPath;
-			var working = Path.Combine(Directory.GetCurrentDirectory(), EXEName + ".ini");
-			if (File.Exists(working)) return working;
-			var exeDir = Path.Combine(Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location), EXEName + ".ini");
-			return exeDir;
-		}
-		static string readValue(string[] lines, string key) {
-			foreach (var line in lines) {
-				if (line.Trim().StartsWith(key + "=", StringComparison.OrdinalIgnoreCase)) {
-					return line.Split('=')[1].Trim();
-				}
-			}
-			return null;
-		}
-		static byte[] parseHex(string hex) {
-			if (string.IsNullOrWhiteSpace(hex)) return null;
-			return hex.Split(new[] { ' ', ',' }, StringSplitOptions.RemoveEmptyEntries)
-					  .Select(s => Convert.ToByte(s, 16)).ToArray();
-		}
-		static int findPattern(byte[] data, byte[] pattern) {
-			for (int i = 0; i <= data.Length - pattern.Length; i++) {
-				var  match = true;
-				for (int j = 0; j < pattern.Length; j++) {
-					if (pattern[j] != data[i + j]) { match = false; break; }
-				}
-				if (match) { return i; }
-			}
-			return -1;
 		}
 		static Tuple<byte[], byte[], int> analyzeAndSuggestPatch(byte[] data) {
 			byte[] prefix = { 0x39, 0x81 };
@@ -215,6 +198,28 @@ namespace CTermSrvPatcher {
 			}
 			return null;
 		}
+		static byte[] parseHex(string hex) {
+			if (string.IsNullOrWhiteSpace(hex)) return null;
+			return hex.Split(new[] { ' ', ',' }, StringSplitOptions.RemoveEmptyEntries)
+					  .Select(s => Convert.ToByte(s, 16)).ToArray();
+		}
+		static int findPattern(byte[] data, byte[] pattern) {
+			for (int i = 0; i <= data.Length - pattern.Length; i++) {
+				var match = true;
+				for (int j = 0; j < pattern.Length; j++) {
+					if (pattern[j] != data[i + j]) { match = false; break; }
+				}
+				if (match) { return i; }
+			}
+			return -1;
+		}
+		static bool bytesMatch(byte[] data, int offset, byte[] pattern) {
+			if (offset < 0 || offset + pattern.Length > data.Length) return false;
+			for (int i = 0; i < pattern.Length; i++) {
+				if (data[offset + i] != pattern[i]) return false;
+			}
+			return true;
+		}
 		static byte[] readFileWithRetry(string path) {
 			try { return File.ReadAllBytes(path); }
 			catch (Exception ex) when (ex is IOException || ex is SecurityException || ex is UnauthorizedAccessException) {
@@ -246,21 +251,20 @@ namespace CTermSrvPatcher {
 				WindowStyle = ProcessWindowStyle.Hidden
 			}).WaitForExit();
 		}
-		static void printUsage() {
-			Console.WriteLine("Usage:");
-			Console.WriteLine("  -a  | --auto                          Analyze & Auto Patch");
-			Console.WriteLine("  -r  | --restore                       Restore Original 'termsrv.dll' File");
-			Console.WriteLine("  -s  | --source        <hex bytes>     e.g. 39 81 3C 06 ...");
-			Console.WriteLine("  -t  | --target        <hex bytes>     e.g. B8 00 01 00 ...");
-			Console.WriteLine("  -f  | --file          <path|->        defaults to system32/termsrv.dll, '-' = stdout");
-			Console.WriteLine("  -c  | --config        <ini path>      default: exeName.ini in working dir or exe dir");
-			Console.WriteLine("  -v  | --version                       show app version");
-			Console.WriteLine("  -tv | --tsver|--ts-version            show termsrv.dll version");
-			Console.WriteLine("  -j  | --allow-jmp-patch               Allow JMP based patch");
-			Console.WriteLine("  -j- | --no-jmp- patch                 DENY JMP based patch");
-			Console.WriteLine("  -?  | --help                          show this message");
-			Console.WriteLine();
-			Console.WriteLine("  Made with ❤️ by a!cbr00t-CGPR ✊");
+		static string resolveIniPath(string configPath) {
+			if (!string.IsNullOrEmpty(configPath)) return configPath;
+			var working = Path.Combine(Directory.GetCurrentDirectory(), EXEName + ".ini");
+			if (File.Exists(working)) return working;
+			var exeDir = Path.Combine(Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location), EXEName + ".ini");
+			return exeDir;
+		}
+		static string readValue(string[] lines, string key) {
+			foreach (var line in lines) {
+				if (line.Trim().StartsWith(key + "=", StringComparison.OrdinalIgnoreCase)) {
+					return line.Split('=')[1].Trim();
+				}
+			}
+			return null;
 		}
 	}
 	/*
@@ -268,4 +272,4 @@ namespace CTermSrvPatcher {
 	  This code is designed to assist in safely and reversibly patching termsrv.dll for multi-session RDP.
 	  Built on .NET Framework 4.6.2 as a standalone utility for educational and administrative use.
 	*/
-		}
+}
