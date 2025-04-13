@@ -23,8 +23,7 @@ namespace CTermSrvPatcher {
 		static string EXEName { get => Path.GetFileNameWithoutExtension(Assembly.GetExecutingAssembly().Location); }
 
 		/// <summary>The main entry point for the application.</summary>
-		[STAThread()]
-		static int Main(string[] args) {
+		[STAThread()] static int Main(string[] args) {
 			Application.EnableVisualStyles();
 			Application.SetCompatibleTextRenderingDefault(false);
 			for (int i = 0; i < args.Length; i++) {
@@ -71,10 +70,20 @@ namespace CTermSrvPatcher {
 				}
 				else { Console.Error.WriteLine("[error] No default or matching patch found. File may be already patched"); return -2; }
 			}
+			var offset = findPattern(original, source); if (offset == -1) {
+				if (findPattern(original, target) != -1) {
+					Console.WriteLine("[info] Patch already applied.");
+					return 0;
+				}
+				Console.Error.WriteLine("[error] Source pattern not found.");
+				return -3;
+			}
+			/*var offset = findPattern(modified, source); if (offset != -1) { Console.Error.WriteLine("[info] File already contains the patch at expected location."); return -3; } */
 			var modified = (byte[])original.Clone();
-			var offset = findPattern(modified, source); if (offset == -1) { Console.Error.WriteLine("[error] Source pattern not found."); return -3; }
 			for (int i = 0; i < target.Length; i++) { modified[offset + i] = target[i]; }
-			if (outputToStdout) { Console.WriteLine(BitConverter.ToString(modified).Replace("-", " ")); }
+			if (outputToStdout) {
+				Console.WriteLine(BitConverter.ToString(modified).Replace("-", " "));
+			}
 			else {
 				if (original.SequenceEqual(modified)) {
 					Console.Error.WriteLine("[error] File seems to be already patched");
@@ -85,7 +94,7 @@ namespace CTermSrvPatcher {
 					if (_service.ServiceName == ServiceName) { service = _service; break; }
 					_service.Close();
 				}
-				var wasRunning = !(service == null || service.Status == ServiceControllerStatus.Stopped|| service.Status == ServiceControllerStatus.StopPending);
+				var wasRunning = !(service == null || service.Status == ServiceControllerStatus.Stopped || service.Status == ServiceControllerStatus.StopPending);
 				if (wasRunning) { service.Stop(); service.WaitForStatus(ServiceControllerStatus.Stopped); service.Refresh(); }
 				try { writeFileWithRetry(filePath, modified); }
 				finally {
@@ -99,10 +108,11 @@ namespace CTermSrvPatcher {
 		static void initRDPSettings(int? maxConnections = null, bool limitOneUserPerSession = false) {
 			maxConnections = maxConnections ?? 999999;
 			try {
-				using (var regKey = Registry.LocalMachine.CreateSubKey(@"SOFTWARE\\Policies\\Microsoft\\Windows NT\\Terminal Services", true)) {
+				using (var regKey = Registry.LocalMachine.CreateSubKey(@"SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services", true)) {
 					regKey.SetValue("MaxInstanceCount", maxConnections.Value, RegistryValueKind.DWord);
+					Console.WriteLine($"[done] MaxInstanceCount set to {maxConnections.Value}");
 					regKey.SetValue("fSingleSessionPerUser", limitOneUserPerSession ? 1 : 0, RegistryValueKind.DWord);
-					Console.WriteLine("[done] MaxInstanceCount set to " + maxConnections.Value);
+					Console.WriteLine($"[done] fSingleSessionPerUser set to {(limitOneUserPerSession ? 1 : 0)}");
 				}
 			}
 			catch (UnauthorizedAccessException) { Console.Error.WriteLine("[error] Access denied. Please run as Administrator."); }
@@ -162,7 +172,9 @@ namespace CTermSrvPatcher {
 		static int findPattern(byte[] data, byte[] pattern) {
 			for (int i = 0; i <= data.Length - pattern.Length; i++) {
 				var  match = true;
-				for (int j = 0; j < pattern.Length; j++) { if (data[i + j] != pattern[j]) { match = false; break; } }
+				for (int j = 0; j < pattern.Length; j++) {
+					if (data[i + j] != pattern[j]) { match = false; break; }
+				}
 				if (match) { return i; }
 			}
 			return -1;
@@ -170,39 +182,38 @@ namespace CTermSrvPatcher {
 		static Tuple<byte[], byte[], int> analyzeAndSuggestPatch(byte[] data) {
 			byte[] prefix = { 0x39, 0x81 };
 			for (int i = 0; i < data.Length - 12; i++) {
-				if (data[i] == prefix[0] && data[i + 1] == prefix[1] && data[i + 6] == 0x0F && data[i + 7] == 0x84) {
-					byte[] src = data.Skip(i).Take(12).ToArray();
-					byte offset0 = src[2];										  // 3C
-					byte offset1 = src[3];										  // 06
-					byte offset2 = src[4];										  // 00
-					int fullOffset = offset0 + (offset1 << 8) + (offset2 << 16);  // 0x63C
-					int patchedOffset = fullOffset - 4;							  // 0x638
-					byte[] patchTarget = {
-						0xB8, 0x00, 0x01, 0x00, 0x00,
-						0x89, 0x81,
-						(byte)(patchedOffset & 0xFF),
-						(byte)((patchedOffset >> 8) & 0xFF),
-						(byte)((patchedOffset >> 16) & 0xFF),
-						0x00,
-						0x90
-					  };
-					return Tuple.Create(src, patchTarget, i);
-				}
+				if (!(data[i] == prefix[0] && data[i + 1] == prefix[1] && data[i + 6] == 0x0F && data[i + 7] == 0x84)) { continue; }
+				byte[] src = data.Skip(i).Take(12).ToArray();
+				byte offset0 = src[2], offset1 = src[3], offset2 = src[4];
+				int fullOffset = offset0 + (offset1 << 8) + (offset2 << 16);
+				int patchedOffset = fullOffset - 4;
+				byte[] patchTarget = {
+					0xB8, 0x00, 0x01, 0x00, 0x00,
+					0x89, 0x81,
+					(byte)(patchedOffset & 0xFF),
+					(byte)((patchedOffset >> 8) & 0xFF),
+					(byte)((patchedOffset >> 16) & 0xFF),
+					0x00,
+					0x90
+				};
+				return Tuple.Create(src, patchTarget, i);
 			}
 			return null;
 		}
-		/* Additional JMP patch variant */
 		static Tuple<byte[], byte[], int> analyzeAndSuggestJmpPatch(byte[] data) {
 			for (int i = 0; i < data.Length - 6; i++) {
-				if (data[i] == 0x0F && data[i + 1] == 0x84) { // JE opcode
-					byte[] src = data.Skip(i).Take(6).ToArray();
-					byte[] offset = src.Skip(2).Take(4).ToArray();
-					byte[] dst = new byte[6];
-					dst[0] = 0xE9; // JMP opcode
-					Array.Copy(offset, 0, dst, 1, 4); // same jump target
-					dst[5] = 0x90; // pad with NOP
-					return Tuple.Create(src, dst, i);
-				}
+				if (data[i] != 0x0F || data[i + 1] != 0x84) { continue; }
+				byte[] src = data.Skip(i).Take(6).ToArray();
+				byte[] offset = src.Skip(2).Take(4).ToArray();
+				// Patch’lenmiş hali oluştur
+				byte[] dst = new byte[6]; dst[0] = 0xE9; Array.Copy(offset, 0, dst, 1, 4); dst[5] = 0x90;
+				// Eğer zaten patch'li ise atla
+				if (data.Skip(i).Take(6).SequenceEqual(dst)) { continue; }
+				// Bu JE'nin hedef uzaklığı çok küçükse, sistemsel değil demektir
+				int jumpOffset = BitConverter.ToInt32(offset, 0);
+				if (jumpOffset < 0x80 || jumpOffset > 0x100000) { continue; }
+				// sadece anlamlı JE'yi öner
+				return Tuple.Create(src, dst, i);
 			}
 			return null;
 		}
