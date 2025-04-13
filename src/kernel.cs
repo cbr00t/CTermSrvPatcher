@@ -59,28 +59,26 @@ namespace CTermSrvPatcher {
 				source = source ?? DefaultSource;
 				target = target ?? DefaultTarget;
 			}
+			int sourceOffset = -1, targetOffset = -1;
 			if (source == null || target == null) {
 				var result = analyzeAndSuggestPatch(original);
-				if (result == null && allowJmpPatch) {
-					result = analyzeAndSuggestJmpPatch(original);
-				}
+				if (result == null && allowJmpPatch) { result = analyzeAndSuggestJmpPatch(original); }
 				if (result != null) {
 					source = result.Item1; target = result.Item2;
+					sourceOffset = findPattern(original, source); targetOffset = findPattern(original, target);
+					if (sourceOffset == -1 && targetOffset != -1) { Console.WriteLine("[info] Patch already applied (confirmed by content)"); return 0; }
 					Console.WriteLine($"[info] Patch auto-selected at [0x${result.Item3:X}]");
 				}
 				else { Console.Error.WriteLine("[error] No default or matching patch found. File may be already patched"); return -2; }
 			}
-			var offset = findPattern(original, source); if (offset == -1) {
-				if (findPattern(original, target) != -1) {
-					Console.WriteLine("[info] Patch already applied.");
-					return 0;
-				}
-				Console.Error.WriteLine("[error] Source pattern not found.");
-				return -3;
-			}
-			/*var offset = findPattern(modified, source); if (offset != -1) { Console.Error.WriteLine("[info] File already contains the patch at expected location."); return -3; } */
-			var modified = (byte[])original.Clone();
-			for (int i = 0; i < target.Length; i++) { modified[offset + i] = target[i]; }
+			if (sourceOffset < 0) { sourceOffset = findPattern(original, source); }
+			if (targetOffset < 0) { targetOffset = findPattern(original, target); }
+			// Eğer source ve target aynı yerdeyse → patch zaten uygulanmış
+			if (sourceOffset == -1 && targetOffset != -1) { Console.WriteLine("[info] Patch already applied."); return 0; }
+			// Eğer source ve target farklı offset'teyse, başka bir 'je' ile karışıyor olabilir
+			if (sourceOffset != -1 && targetOffset == sourceOffset) { Console.WriteLine("[info] Target already present at source offset. Skipping."); return 0; }
+			/* &modified[0] + sourceOffset */
+			var modified = (byte[])original.Clone(); for (int i = 0; i < target.Length; i++) { modified[sourceOffset + i] = target[i]; }
 			if (outputToStdout) {
 				Console.WriteLine(BitConverter.ToString(modified).Replace("-", " "));
 			}
@@ -173,7 +171,7 @@ namespace CTermSrvPatcher {
 			for (int i = 0; i <= data.Length - pattern.Length; i++) {
 				var  match = true;
 				for (int j = 0; j < pattern.Length; j++) {
-					if (data[i + j] != pattern[j]) { match = false; break; }
+					if (pattern[j] != data[i + j]) { match = false; break; }
 				}
 				if (match) { return i; }
 			}
@@ -270,4 +268,4 @@ namespace CTermSrvPatcher {
 	  This code is designed to assist in safely and reversibly patching termsrv.dll for multi-session RDP.
 	  Built on .NET Framework 4.6.2 as a standalone utility for educational and administrative use.
 	*/
-}
+		}
