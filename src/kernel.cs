@@ -73,8 +73,8 @@ namespace CTermSrvPatcher {
 			if (sourceOffset == -1 && targetOffset != -1) { Console.WriteLine("[info] Patch already applied."); return 0; }
 			// Eğer source ve target farklı offset'teyse, başka bir 'je' ile karışıyor olabilir
 			if (sourceOffset != -1 && targetOffset == sourceOffset) { Console.WriteLine("[info] Target already present at source offset. Skipping."); return 0; }
-			/* &modified[0] + sourceOffset */
-			var modified = (byte[])original.Clone(); for (int i = 0; i < target.Length; i++) { modified[sourceOffset + i] = target[i]; }
+			var modified = (byte[])original.Clone();        /* &modified[0] + sourceOffset */
+			for (int i = 0; i < target.Length; i++) { modified[sourceOffset + i] = target[i]; }
 			if (outputToStdout) {
 				Console.WriteLine(BitConverter.ToString(modified).Replace("-", " "));
 			}
